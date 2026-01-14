@@ -1,9 +1,25 @@
 import { encode as encodeCl100k } from 'gpt-tokenizer/encoding/cl100k_base';
-import { renderTemplate, resolvePromptTemplate } from '../lib/promptRegistry.js';
+import {
+  estimateCostUsd,
+  normalizeModel,
+  renderTemplate,
+  resolvePromptTemplate,
+} from '../lib/promptRegistry.js';
 
 function countTokens(text) {
   const s = typeof text === 'string' ? text : (text == null ? '' : String(text));
   return encodeCl100k(s).length;
+}
+
+function unwrapBody(reqBody) {
+  let body = reqBody ?? {};
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch { body = {}; }
+  }
+  if (body && typeof body === 'object' && body.body && typeof body.body === 'object') {
+    body = body.body;
+  }
+  return body;
 }
 
 export default async function handler(req, res) {
@@ -13,50 +29,49 @@ export default async function handler(req, res) {
   }
 
   try {
-    let body = req.body ?? {};
-
-    // Be tolerant of clients that send JSON as a string.
-    if (typeof body === 'string') {
-      try {
-        body = JSON.parse(body);
-      } catch {
-        body = {};
-      }
-    }
-
-    // Be tolerant of wrappers like { body: {...} }
-    if (body && typeof body === 'object' && body.body && typeof body.body === 'object') {
-      body = body.body;
-    }
-
-    const promptOverride = body.prompt ?? body.promptTextForTokenizing ?? body.prompt_text ?? null;
-    const completion = body.completion ?? body.completionTextForTokenizing ?? body.completion_text ?? '';
+    const body = unwrapBody(req.body);
 
     const key = body.key ?? body.promptKey ?? null;
     const workflow = body.workflow ?? body.workflowName ?? null;
     const nodeName = body.nodeName ?? body.llmNodeName ?? null;
+
     const vars = (body.vars && typeof body.vars === 'object') ? body.vars : {};
     const varsJson = (body.varsJson && typeof body.varsJson === 'object') ? body.varsJson : ((body.json && typeof body.json === 'object') ? body.json : null);
     const varsByNode = (body.varsByNode && typeof body.varsByNode === 'object') ? body.varsByNode : null;
+    const promptOverride = body.prompt ?? body.promptTextForTokenizing ?? body.prompt_text ?? null;
+    const completion = body.completion ?? body.completionTextForTokenizing ?? body.completion_text ?? '';
 
     const { resolvedKey, entry } = resolvePromptTemplate({ key, workflow, nodeName });
+
     const promptSource = promptOverride != null ? 'override' : (entry ? 'template' : 'missing');
+    const template = entry?.template ?? '';
     const prompt = promptOverride != null
       ? String(promptOverride)
-      : (entry ? renderTemplate(entry.template, { vars, varsJson, varsByNode }) : '');
+      : (entry ? renderTemplate(template, { vars, varsJson, varsByNode }) : '');
 
-    const promptTokens = countTokens(prompt);
-    const completionTokens = countTokens(completion);
+    const promptTokensRaw = countTokens(prompt);
+    const completionTokensRaw = countTokens(completion);
+
+    const multiplier = Number(body.multiplier ?? body.allowanceMultiplier ?? entry?.defaultMultiplier ?? 1) || 1;
+    const promptTokens = Math.max(0, Math.round(promptTokensRaw * multiplier));
+    const completionTokens = Math.max(0, Math.round(completionTokensRaw * multiplier));
+
+    const model = normalizeModel(body.model ?? entry?.model ?? 'gpt-5');
+    const costUsd = estimateCostUsd({ model, promptTokens, completionTokens });
+
     return res.status(200).json({
       promptTokens,
       completionTokens,
       totalTokens: promptTokens + completionTokens,
-      promptChars: typeof prompt === 'string' ? prompt.length : String(prompt ?? '').length,
+      promptChars: prompt.length,
       completionChars: typeof completion === 'string' ? completion.length : String(completion ?? '').length,
       // Diagnostics
       templateFound: Boolean(entry),
       resolvedKey,
       promptSource,
+      model,
+      multiplier,
+      costUsd,
     });
   } catch (err) {
     return res.status(500).json({ error: String(err) });
