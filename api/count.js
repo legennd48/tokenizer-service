@@ -12,7 +12,24 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { prompt, completion } = req.body ?? {};
+    let body = req.body ?? {};
+
+    // Be tolerant of clients that send JSON as a string.
+    if (typeof body === 'string') {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        body = {};
+      }
+    }
+
+    // Be tolerant of wrappers like { body: {...} }
+    if (body && typeof body === 'object' && body.body && typeof body.body === 'object') {
+      body = body.body;
+    }
+
+    const prompt = body.prompt ?? body.promptTextForTokenizing ?? body.prompt_text ?? '';
+    const completion = body.completion ?? body.completionTextForTokenizing ?? body.completion_text ?? '';
     const promptTokens = countTokens(prompt);
     const completionTokens = countTokens(completion);
     return res.status(200).json({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens });
