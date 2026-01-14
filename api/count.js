@@ -32,7 +32,13 @@ export default async function handler(req, res) {
     const completion = body.completion ?? body.completionTextForTokenizing ?? body.completion_text ?? '';
     const promptTokens = countTokens(prompt);
     const completionTokens = countTokens(completion);
-    return res.status(200).json({ promptTokens, completionTokens, totalTokens: promptTokens + completionTokens });
+    return res.status(200).json({
+      promptTokens,
+      completionTokens,
+      totalTokens: promptTokens + completionTokens,
+      promptChars: typeof prompt === 'string' ? prompt.length : String(prompt ?? '').length,
+      completionChars: typeof completion === 'string' ? completion.length : String(completion ?? '').length,
+    });
   } catch (err) {
     return res.status(500).json({ error: String(err) });
   }
