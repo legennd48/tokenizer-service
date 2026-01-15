@@ -18,6 +18,12 @@ function countTokens(text, model) {
   return shouldUseO200k(model) ? encodeO200k(s).length : encodeCl100k(s).length;
 }
 
+function hasOutputParserInstructions(prompt) {
+  const p = typeof prompt === 'string' ? prompt : String(prompt ?? '');
+  // Our canonical injected block begins with this exact phrase.
+  return p.includes('Return a JSON object with the following JSON Schema:');
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -63,7 +69,9 @@ export default async function handler(req, res) {
       ? String(promptOverride)
       : (entry ? renderTemplate(entry.template, { vars, varsJson, varsByNode }) : '');
 
-    if (promptOverride == null && entry?.outputParser) {
+    // Mirror /estimate: append Structured Output Parser format instructions whenever we
+    // know the schema, unless explicitly disabled or already present.
+    if (entry?.outputParser && body.appendOutputParser !== false && !hasOutputParserInstructions(prompt)) {
       prompt = appendOutputParserInstructions(prompt, entry.outputParser);
     }
 

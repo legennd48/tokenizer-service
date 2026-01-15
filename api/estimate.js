@@ -36,6 +36,12 @@ function unwrapBody(reqBody) {
   return body;
 }
 
+function hasOutputParserInstructions(prompt) {
+  const p = typeof prompt === 'string' ? prompt : String(prompt ?? '');
+  // Our canonical injected block begins with this exact phrase.
+  return p.includes('Return a JSON object with the following JSON Schema:');
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -70,7 +76,9 @@ export default async function handler(req, res) {
 
     // If the template was extracted from an n8n chain that uses Structured Output Parser,
     // append the same format instructions block n8n/LangChain injects.
-    if (promptOverride == null && entry?.outputParser) {
+    // We do this even when a caller provided a prompt override (common in n8n Cloud),
+    // unless they explicitly disabled it or the prompt already contains the block.
+    if (entry?.outputParser && body.appendOutputParser !== false && !hasOutputParserInstructions(prompt)) {
       prompt = appendOutputParserInstructions(prompt, entry.outputParser);
     }
 
