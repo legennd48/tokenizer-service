@@ -78,6 +78,84 @@ function isPromptNode(node) {
   );
 }
 
+function isStructuredOutputParserNode(node) {
+  return String(node?.type ?? '') === '@n8n/n8n-nodes-langchain.outputParserStructured';
+}
+
+function findNodeByName(nodes, name) {
+  const n = String(name ?? '').trim();
+  if (!n) return null;
+  return nodes.find((x) => String(x?.name ?? '').trim() === n) ?? null;
+}
+
+function findStructuredOutputParserForChain(parsed, chainNodeName) {
+  const connections = parsed?.connections;
+  if (!connections || typeof connections !== 'object') return null;
+
+  // In n8n exports, output parser nodes connect to the chain via `ai_outputParser`.
+  // Example:
+  //  "Parse X": { "ai_outputParser": [[{ node: "Generate X", type: "ai_outputParser" }]] }
+  for (const [fromNodeName, conn] of Object.entries(connections)) {
+    const ai = conn?.ai_outputParser;
+    if (!Array.isArray(ai)) continue;
+    for (const branch of ai) {
+      if (!Array.isArray(branch)) continue;
+      for (const edge of branch) {
+        if (edge?.node === chainNodeName && edge?.type === 'ai_outputParser') {
+          return String(fromNodeName);
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function inferJsonSchemaFromExample(exampleValue) {
+  if (exampleValue == null) return { type: 'string' };
+  if (typeof exampleValue === 'string') return { type: 'string' };
+  if (typeof exampleValue === 'number') return { type: 'number' };
+  if (typeof exampleValue === 'boolean') return { type: 'boolean' };
+  if (Array.isArray(exampleValue)) {
+    const allStrings = exampleValue.every((v) => typeof v === 'string');
+    const items = allStrings ? { type: 'string' } : {};
+    return { type: 'array', items };
+  }
+  if (typeof exampleValue === 'object') {
+    const props = {};
+    const req = [];
+    for (const [k, v] of Object.entries(exampleValue)) {
+      props[k] = inferJsonSchemaFromExample(v);
+      req.push(k);
+    }
+    return { type: 'object', properties: props, required: req, additionalProperties: false };
+  }
+  return { type: 'string' };
+}
+
+function buildLangchainSchemaInstanceFromExample(exampleObj) {
+  // n8n's Structured Output Parser wraps into an `output` object.
+  const inner = inferJsonSchemaFromExample(exampleObj);
+
+  // Force the wrapped schema shape.
+  const schema = {
+    type: 'object',
+    properties: {
+      output: {
+        type: 'object',
+        properties: inner.properties ?? {},
+        required: inner.required ?? [],
+        additionalProperties: false,
+      },
+    },
+    required: ['output'],
+    additionalProperties: false,
+    $schema: 'http://json-schema.org/draft-07/schema#',
+  };
+
+  return schema;
+}
+
 async function main() {
   const out = {};
 
@@ -110,10 +188,32 @@ async function main() {
       const retryOnFail = Boolean(node?.retryOnFail);
       const defaultMultiplier = retryOnFail && maxTries > 1 ? maxTries : 1.0;
 
-      out[key] = {
-        template,
-        defaultMultiplier,
-      };
+      const entry = { template, defaultMultiplier };
+
+      // If the chain uses a Structured Output Parser, store its schema so the service
+      // can append the same format instructions LangChain injects at runtime.
+      if (String(node?.type ?? '') === '@n8n/n8n-nodes-langchain.chainLlm' && Boolean(node?.parameters?.hasOutputParser)) {
+        const parserNodeName = findStructuredOutputParserForChain(parsed, nodeName);
+        if (parserNodeName) {
+          const parserNode = findNodeByName(nodes, parserNodeName);
+          if (parserNode && isStructuredOutputParserNode(parserNode)) {
+            const raw = parserNode?.parameters?.jsonSchemaExample;
+            if (typeof raw === 'string' && raw.trim()) {
+              try {
+                const exampleObj = JSON.parse(raw);
+                entry.outputParser = {
+                  type: 'langchain_structured_v1',
+                  schema: buildLangchainSchemaInstanceFromExample(exampleObj),
+                };
+              } catch {
+                // Ignore invalid schema examples
+              }
+            }
+          }
+        }
+      }
+
+      out[key] = entry;
     }
   }
 
@@ -131,6 +231,9 @@ async function main() {
     bodyLines.push(`  ${JSON.stringify(key)}: {`);
     bodyLines.push(`    template: ${JSON.stringify(tpl)},`);
     bodyLines.push(`    defaultMultiplier: ${JSON.stringify(entry.defaultMultiplier)},`);
+    if (entry.outputParser) {
+      bodyLines.push(`    outputParser: ${JSON.stringify(entry.outputParser)},`);
+    }
     bodyLines.push('  },');
   }
 

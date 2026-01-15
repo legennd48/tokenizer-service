@@ -1,9 +1,21 @@
 import { encode as encodeCl100k } from 'gpt-tokenizer/encoding/cl100k_base';
-import { renderTemplate, resolvePromptTemplate } from '../lib/promptRegistry.js';
+import { encode as encodeO200k } from 'gpt-tokenizer/encoding/o200k_base';
+import { appendOutputParserInstructions, normalizeModel, renderTemplate, resolvePromptTemplate } from '../lib/promptRegistry.js';
 
-function countTokens(text) {
+function shouldUseO200k(model) {
+  const m = normalizeModel(model);
+  return (
+    m === 'chatgpt-4o-latest' ||
+    m.startsWith('gpt-4o') ||
+    m.startsWith('o1') ||
+    m.startsWith('o3') ||
+    m.startsWith('o4')
+  );
+}
+
+function countTokens(text, model) {
   const s = typeof text === 'string' ? text : (text == null ? '' : String(text));
-  return encodeCl100k(s).length;
+  return shouldUseO200k(model) ? encodeO200k(s).length : encodeCl100k(s).length;
 }
 
 export default async function handler(req, res) {
@@ -36,17 +48,27 @@ export default async function handler(req, res) {
     const workflow = body.workflow ?? body.workflowName ?? null;
     const nodeName = body.nodeName ?? body.llmNodeName ?? null;
     const vars = (body.vars && typeof body.vars === 'object') ? body.vars : {};
-    const varsJson = (body.varsJson && typeof body.varsJson === 'object') ? body.varsJson : ((body.json && typeof body.json === 'object') ? body.json : null);
+    let varsJson = (body.varsJson && typeof body.varsJson === 'object') ? body.varsJson : ((body.json && typeof body.json === 'object') ? body.json : null);
     const varsByNode = (body.varsByNode && typeof body.varsByNode === 'object') ? body.varsByNode : null;
 
+    if ((!varsJson || (typeof varsJson === 'object' && varsJson && Object.keys(varsJson).length === 0)) && Object.keys(vars).length > 0) {
+      // Many extracted templates use $json.*. If callers only send `vars`, treat it as $json for rendering.
+      varsJson = vars;
+    }
+
     const { resolvedKey, entry } = resolvePromptTemplate({ key, workflow, nodeName });
+    const model = normalizeModel(body.model ?? entry?.model ?? 'gpt-5');
     const promptSource = promptOverride != null ? 'override' : (entry ? 'template' : 'missing');
-    const prompt = promptOverride != null
+    let prompt = promptOverride != null
       ? String(promptOverride)
       : (entry ? renderTemplate(entry.template, { vars, varsJson, varsByNode }) : '');
 
-    const promptTokens = countTokens(prompt);
-    const completionTokens = countTokens(completion);
+    if (promptOverride == null && entry?.outputParser) {
+      prompt = appendOutputParserInstructions(prompt, entry.outputParser);
+    }
+
+    const promptTokens = countTokens(prompt, model);
+    const completionTokens = countTokens(completion, model);
     return res.status(200).json({
       promptTokens,
       completionTokens,
@@ -57,6 +79,7 @@ export default async function handler(req, res) {
       templateFound: Boolean(entry),
       resolvedKey,
       promptSource,
+      model,
     });
   } catch (err) {
     return res.status(500).json({ error: String(err) });
